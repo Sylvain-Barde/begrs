@@ -156,10 +156,6 @@ class begrs:
                             path + '/model_state.pt')
                 torch.save(self.likelihood.state_dict(), 
                             path + '/likelihood_state.pt') 
-                # torch.save(self.model.cpu().state_dict(), 
-                #             path + '/model_state.pt')
-                # torch.save(self.likelihood.cpu().state_dict(), 
-                #             path + '/likelihood_state.pt') 
             
                 print(' - Done')
                 
@@ -195,7 +191,6 @@ class begrs:
                 self.num_param = begrs_dict['num_param']
                 self.num_latents = begrs_dict['num_latents']
                 self.num_inducing_pts = begrs_dict['num_inducing_pts']
-                # self.useGPU = begrs_dict['useGPU']
                 
             else:
                 
@@ -205,7 +200,8 @@ class begrs:
                 lik_state_dict = torch.load(likelihood_path)
                 self.likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
                     num_tasks=self.num_vars)
-                self.likelihood.load_state_dict(lik_state_dict)
+                # self.likelihood.load_state_dict(lik_state_dict)
+                self.likelihood.load_state_dict(lik_state_dict, strict = False)
                 
                 if self.haveGPU is True and self.useGPU is True:
                     self.likelihood = self.likelihood.cuda()
@@ -221,7 +217,8 @@ class begrs:
                                       self.num_param,
                                       self.num_latents,
                                       self.num_inducing_pts)
-                self.model.load_state_dict(mod_state_dict)
+                # self.model.load_state_dict(mod_state_dict)
+                self.model.load_state_dict(mod_state_dict, strict = False)
                 
                 if self.haveGPU is True and self.useGPU is True:
                     self.model = self.model.cuda()
@@ -354,7 +351,6 @@ class begrs:
         else:
             
             print(' CUDA not availabe - Using CPU')
-            # filterwarnings("ignore", category=UserWarning)
             
         
         # Create data loader from training data
@@ -405,15 +401,19 @@ class begrs:
                 
             minibatch_iter.close()
         
-        
-    def logP(self, theta, batch_size = 40):
+
+    def logP(self, theta_base, batch_size = 40):
                
         paramInds = self.num_vars + self.num_param
-        self.testX[:, self.num_vars:paramInds] = torch.from_numpy(
-            np.tile(theta[None,:],(self.N,1))).float()
+        
+        theta = torch.from_numpy(theta_base[None,:]).float()
+        theta.requires_grad_(True)
+        
+        testX = self.testX.clone()
+        testX[:,self.num_vars:paramInds] = theta.repeat((self.N,1))
     
         # Create data loader for batches
-        test_dataset = TensorDataset(self.testX, self.testY)
+        test_dataset = TensorDataset(testX, self.testY)
         test_loader = DataLoader(test_dataset, 
                                  batch_size=batch_size, 
                                  shuffle=False)
@@ -425,16 +425,34 @@ class begrs:
             predictions = self.likelihood(self.model(x_batch))
             logP += predictions.log_prob(y_batch)
             
+        logP.backward(retain_graph=True)
+        theta_grad = theta.grad
+            
         if self.haveGPU is True and self.useGPU is True:
             
-            returnValue = logP.cpu().detach().numpy()
+            returnValue = (np.float64(logP.detach().cpu().numpy()),
+                           np.float64(theta_grad.detach().cpu().numpy().flatten()))
             
         else:
                 
-            returnValue = logP.detach().numpy()
+            returnValue = (np.float64(logP.detach().numpy()),
+                           np.float64(theta_grad.detach().numpy().flatten()))
             
-        return float(returnValue)
+        return returnValue
         
+        
+    def softLogPrior(self, theta, k = 20):
+        
+        sample = np.asarray(theta)
+    
+        f_x = np.exp(-k*(sample + 3**0.5))
+        g_x = np.exp( k*(sample - 3**0.5))
+    
+        prior = - np.log(1 + f_x) - np.log(1 + g_x)
+        grad = k*(f_x/(1+f_x) - g_x/(1+g_x))
+     
+        return (sum(prior),grad)
+    
         
     def dlogP(self, theta, batch_size = 40):
         
