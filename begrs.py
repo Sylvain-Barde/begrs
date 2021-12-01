@@ -92,6 +92,8 @@ class begrs:
         self.trainY = None
         self.testX = None
         self.testY = None
+        self.losses = None
+        self.KLdiv = None
         
         self.N = 0
         self.num_vars = 0
@@ -142,6 +144,8 @@ class begrs:
                             'trainY':self.trainY,
                             'testX':self.testX,
                             'testY':self.testY,
+                            'losses':self.losses,
+                            'KLdiv':self.KLdiv,
                             'N':self.N,
                             'num_vars':self.num_vars,
                             'num_param':self.num_param,
@@ -187,6 +191,8 @@ class begrs:
                 self.testX = begrs_dict['testX']
                 self.testY = begrs_dict['testY']
                 self.N = begrs_dict['N']
+                self.losses = begrs_dict['losses']
+                self.KLdiv = begrs_dict['KLdiv']
                 self.num_vars = begrs_dict['num_vars']
                 self.num_param = begrs_dict['num_param']
                 self.num_latents = begrs_dict['num_latents']
@@ -200,7 +206,6 @@ class begrs:
                 lik_state_dict = torch.load(likelihood_path)
                 self.likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
                     num_tasks=self.num_vars)
-                # self.likelihood.load_state_dict(lik_state_dict)
                 self.likelihood.load_state_dict(lik_state_dict, strict = False)
                 
                 if self.haveGPU is True and self.useGPU is True:
@@ -217,7 +222,6 @@ class begrs:
                                       self.num_param,
                                       self.num_latents,
                                       self.num_inducing_pts)
-                # self.model.load_state_dict(mod_state_dict)
                 self.model.load_state_dict(mod_state_dict, strict = False)
                 
                 if self.haveGPU is True and self.useGPU is True:
@@ -307,8 +311,7 @@ class begrs:
             test_x_array[:,0:self.num_vars] = testingData[0:-1]
             self.testX = torch.from_numpy(test_x_array).float() 
             
-            # MOVE? CREATE a 'set testing' method?
-            # if self.useGPU is True and torch.cuda.is_available():
+            # CUDA check
             if self.haveGPU is True and self.useGPU is True:
                 self.testY = self.testY.cuda()
                 self.testX = self.testX.cuda()
@@ -382,6 +385,7 @@ class begrs:
                                             num_data = self.trainY.size(0))
        
         # Run optimisation
+        self.losses = []
         for i in range(epochs):
             
             # Within each iteration, we will go over each minibatch of data
@@ -390,6 +394,8 @@ class begrs:
                                   leave = True,
                                   file=sys.stdout)
             
+            iterLoss = []
+            iterKL = []
             for x_batch, y_batch in minibatch_iter:
                 optimizer.zero_grad()
                 output = self.model(x_batch)
@@ -399,7 +405,15 @@ class begrs:
                 loss.backward()
                 optimizer.step()
                 
+                kl_term = self.model.variational_strategy.kl_divergence().div(
+                    self.trainY.size(0))
+                iterLoss.append(loss.item())
+                iterKL.append(kl_term.item())
+                
             minibatch_iter.close()
+            self.losses.append(iterLoss)
+            self.KLdiv.append(iterKL)
+
         
 
     def logP(self, theta_base, batch_size = 40):
