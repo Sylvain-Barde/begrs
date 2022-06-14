@@ -2,7 +2,24 @@
 """
 Created on Fri Aug 27 08:48:12 2021
 
-@author: sb636
+@author: Sylvain Barde, University of Kent
+
+Implements Bayesian Estimation with a Gaussian Process Regression Surrogate.
+
+Requires the following packages:
+
+    torch
+    gpytorch
+
+Classes:
+
+    begrsGPModel
+    begrs
+
+Utilities:
+
+    cholesky_factor
+
 """
 
 import os
@@ -21,6 +38,22 @@ from gpytorch.lazy import SumLazyTensor, MatmulLazyTensor, KroneckerProductLazyT
 #------------------------------------------------------------------------------
 # Cholesky factorisation utility
 def cholesky_factor(induc_induc_covar):
+    """
+    Performs the Cholesky factorisation of the Kernel matrix of inducing points
+    required for the whitening transformation used by GPytorch.
+
+    Note: this utility is used by the toolbox and is not meant to be called
+    directly by the user.
+
+        Arguments:
+            induc_induc_covar (AddedDiagLazyTensor):
+                The kernel matrix for the inducing points
+
+        Returns:
+            (TriangularLazyTensor) :
+                The corresponding Cholesky factorisation
+
+    """
 
     L = psd_safe_cholesky(delazify(induc_induc_covar).double())
 
@@ -31,12 +64,42 @@ filterwarnings("ignore", category = UserWarning)
 #------------------------------------------------------------------------------
 # Main classes
 class begrsGPModel(gpytorch.models.ApproximateGP):
+    """
+    Underlying LCM model used byt the 'begrs' class.
+    Extension of the 'gpytorch.models.ApproximateGP' class
+
+        Attributes:
+            variational_strategy (gpytorch.variational.LMCVariationalStrategy):
+                The variational approximation for the GP
+            mean_module (gpytorch.means.ConstantMean):
+                The prediction mean function
+            covar_module (gpytorch.kernels.ScaleKernel):
+                The prediction covariance function
+
+        Methods:
+            __init__ :
+                Initialises the class and associated variational strategy
+            forward(x):
+                Returns the GP prediction at x
+    """
 
     # Multitask Gaussian process, with the batch dimension serving to store
     # the multiple tasks.
 
     def __init__(self, num_vars, num_param, num_latents, num_inducing_pts):
+        """
+        Initialises the class and associated variational strategy
 
+            Arguments:
+                num_vars (int):
+                    Number of observable variables in the data
+                num_param (int):
+                    Number of models parameters to estimate
+                num_latents (int):
+                    Number of latent variables for LCM
+                num_inducing_pts (int):
+                    Number of inducing points for the variational strategy
+        """
         # Separate inducing points for each latent function
         inducing_points = torch.rand(num_latents,
                                      num_inducing_pts,
@@ -73,7 +136,17 @@ class begrsGPModel(gpytorch.models.ApproximateGP):
         )
 
     def forward(self, x):
+        """
+        Returns the GP prediction at x
 
+        Arguments:
+            x (Tensor):
+                An input observation
+
+        Returns:
+            (gpytorch.distributions.MultivariateNormal) :
+                The LCM prediction at x
+        """
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
 
@@ -81,9 +154,84 @@ class begrsGPModel(gpytorch.models.ApproximateGP):
 
 
 class begrs:
+    """
+    Main module class for the package. See function-level help for more details.
+
+    Attributes:
+        model (begrsGPModel):
+            Instance of the begrsGPModel class
+        likelihood (gpytorch.likelihoods.MultitaskGaussianLikelihood):
+            Likelihood for the LCM model
+        parameter_range (ndarray):
+            Bounds for the parameter samples
+        trainX (Tensor):
+            Training (simulated) inputs
+        trainY (Tensor):
+            Training (simulated) outputs
+        testX (Tensor):
+            Evaluation (empirical) inputs
+        testY (Tensor):
+            Evaluation (empirical) outputs
+        losses (list):
+            list of ELBO values for each training epoch
+        KLdiv ():
+            list of variational KL distance values for each training epoch
+        N (int):
+            Number of emprical observations available
+        num_vars (int):
+            Number of observable variables in the data
+        num_param (int):
+            Number of models parameters to estimate
+        num_latents (int):
+            Number of latent variables for the LCM
+        num_inducing_pts (int):
+            Number of inducing points for the variational strategy
+        useGPU (bool):
+            Flags use of GPU acceleration (if available)
+        haveGPU (bool):
+            Flags availability of GPU acceleration
+
+    Methods:
+        __init__ :
+            Initialises an empty instance of the class
+        center:
+            Centers a raw parameter vector
+        uncenter:
+            Uncenters a centered parameter vector
+        save:
+            Saves the state of the underlying LCM surrogate
+        load:
+            Load a saved LCM surrogate
+        setTrainingData:
+            Build a dataset for LCM training
+        setTestingData:
+            Set an empirical dataset for estimation (LCM evaluation)
+        train:
+            Train the LCM surrogate on a pre-specified training dataset
+        logP:
+            Evaluate the log-likelihood of the LCM surrogate on the empirical
+            data
+        softLogPrior:
+            Evaluate the logarithm of the soft minimal prior
+        logPSingle (utility):
+            Calculates the log-likelihood based on single transitions (diagonal
+            covariance matrix)
+        logPBatched (utility):
+            Calculates the log-likelihood based on batches of transitions
+        dlogP (utility):
+            Calculates the gradient of the batched likelihood using the
+            analytical derivation
+    """
 
     def __init__(self, useGPU = True):
+        """
+        Initialises an empty instance of the begrs class
 
+        Arguments:
+            useGPU (bool):
+                Flags use of GPU acceleration. True by default, only actually
+                used if GPU acceleration is detected on initialisation.
+        """
         # Initialise empty fields
         self.model = None
         self.likelihood = None
@@ -109,7 +257,18 @@ class begrs:
 
 
     def center(self, sample):
+        """
+        Centers a raw parameter vector, based on the 'parameter_range' attribute
+        of the begrs class
 
+        Arguments:
+            sample (ndarray):
+                A raw sample
+
+        Returns:
+            sampleCntrd (ndarray):
+                A centred sample
+        """
         mean = (self.parameter_range[:,0] + self.parameter_range[:,1])/2
         stdDev = (self.parameter_range[:,1] - self.parameter_range[:,0])/np.sqrt(12)
 
@@ -119,7 +278,18 @@ class begrs:
 
 
     def uncenter(self, sampleCntrd):
+        """
+        Uncenters a centred parameter vector, based on the 'parameter_range'
+        attribute of the begrs class
 
+        Arguments:
+            sampleCntrd (ndarray):
+                A centred sample
+
+        Returns:
+            sample (ndarray):
+                A raw sample
+        """
         mean = (self.parameter_range[:,0] + self.parameter_range[:,1])/2
         stdDev = (self.parameter_range[:,1] - self.parameter_range[:,0])/np.sqrt(12)
 
@@ -129,7 +299,27 @@ class begrs:
 
 
     def save(self, path):
+        """
+        Saves the state of the underlying LCM surrogate
 
+        This is designed to save the state of the LCM surrogate after training,
+        attributes relating to the testing/evaluation methods are NOT saved.
+        This requires setting the testing data explicitly every time an
+        estimation needs to be run, but ensures that saved LCM surrogates can be
+        used on multiple emprirical datasets. See the 'setTestingData' help for
+        more details on this aspect.
+
+        The specified saving folder is created by the method, and the method
+        will fail if the path points to a pre-existing folder. This is to avoid
+        overwriting pre-existing saved states.
+
+        Arguments:
+            path (str):
+                A path to a folder - the folder cannot already exist
+
+        Returns:
+            None
+        """
         print(u'\u2500' * 75)
         print(' Saving model to: {:s} '.format(path), end="", flush=True)
 
@@ -142,16 +332,15 @@ class begrs:
                 saveDict = {'parameter_range':self.parameter_range,
                             'trainX':self.trainX,
                             'trainY':self.trainY,
-                            'testX':self.testX,
-                            'testY':self.testY,
+                            # 'testX':self.testX,
+                            # 'testY':self.testY,
                             'losses':self.losses,
                             'KLdiv':self.KLdiv,
-                            'N':self.N,
+                            # 'N':self.N,
                             'num_vars':self.num_vars,
                             'num_param':self.num_param,
                             'num_latents':self.num_latents,
-                            'num_inducing_pts':self.num_inducing_pts}#,
-                            # 'useGPU':self.useGPU}
+                            'num_inducing_pts':self.num_inducing_pts}
 
                 torch.save(saveDict,
                            path + '/data_parameters.pt')
@@ -173,7 +362,16 @@ class begrs:
 
 
     def load(self, path):
+        """
+        Load a saved LCM surrogate
 
+        Arguments:
+            path (str):
+                A path to a folder containing a saved state
+
+        Returns:
+            None
+        """
         print(u'\u2500' * 75)
         print(' Loading model from: {:s} '.format(path), end="", flush=True)
 
@@ -188,9 +386,9 @@ class begrs:
                 self.parameter_range = begrs_dict['parameter_range']
                 self.trainX = begrs_dict['trainX']
                 self.trainY = begrs_dict['trainY']
-                self.testX = begrs_dict['testX']
-                self.testY = begrs_dict['testY']
-                self.N = begrs_dict['N']
+                # self.testX = begrs_dict['testX']
+                # self.testY = begrs_dict['testY']
+                # self.N = begrs_dict['N']
                 self.losses = begrs_dict['losses']
                 self.KLdiv = begrs_dict['KLdiv']
                 self.num_vars = begrs_dict['num_vars']
@@ -239,11 +437,43 @@ class begrs:
 
 
     def setTrainingData(self, trainingData, doeSamples, parameter_range):
+        """
+        Build a dataset for LCM training
 
+        The method builds and saves the training data structure based on the
+        simulated data and the simulation samples. The input structure in
+        particular will contain lags of the observable variables and the
+        parameter setttings.
+
+        Note the specific structure that the arguments must take
+
+        Arguments:
+            trainingData (ndarray)
+                3D numpy array containing the simulated data. Structure is:
+
+                    T x num_vars x numSamples
+
+            doeSamples (ndarray)
+                2D numpy array containing the parameter values corresponding to
+                each simulation run. Structure is:
+
+                    numSamples x num_param
+
+            parameter_range (ndarray)
+                2D numpy array containing the parameter bounds for the samples.
+                Structure is:
+
+                    num_param x 2
+
+                Lower bound in the first column, uper bound in the second.
+
+        Returns:
+            None
+        """
         print(u'\u2500' * 75)
         print(' Setting training data set', end="", flush = True)
 
-        # allocate self.num_vars and self.num_param from datasets
+        # Allocate self.num_vars and self.num_param from datasets
         numSamples = doeSamples.shape[0]
 
         if numSamples == trainingData.shape[2] and doeSamples.shape[1] == parameter_range.shape[0]:
@@ -296,7 +526,38 @@ class begrs:
 
 
     def setTestingData(self, testingData):
+        """
+        Set an empirical dataset for estimation (LCM evaluation)
 
+        The method builds the evaluation structure from the empirical dataset,
+        precomputes some fixed likelihood components (to save time) and sets
+        the model to evaluation mode.
+
+        Note: The testing data will need to be explicitly set every time the
+        user wants to load a given begrs surrogate to run an empirical
+        estimation. This is to avoid using the wrong empirical data, and also to
+        ensure that the LCM model is set evaluation mode prior to calculating
+        surrogate likelihoods.
+
+        This means that the following attributes of the begrs class are set by
+        this method but are not saved by the 'save' method:
+            N
+            testX
+            testY
+            L
+            lmcCoeff
+            middle_diag
+            noise
+
+        Arguments:
+            testingData (ndarray)
+                2D numpy array containing the emprical data. Structure is:
+
+                    T x num_vars
+
+        Returns:
+            None
+        """
         print(u'\u2500' * 75)
         print(' Setting testing data set', end="", flush=True)
 
@@ -363,7 +624,34 @@ class begrs:
 
     def train(self, num_latents, num_inducing_pts, batchsize, epochs,
               learning_rate, shuffle = True):
+        """
+        Train the LCM surrogate on a pre-specified training dataset
 
+        Note: users must have loaded the training data using the
+        'setTrainingData' method prior to running the 'train' method
+
+        Arguments:
+            num_latents (int):
+                Number of latent variables for the LCM
+            num_inducing_pts (int):
+                Number of inducing points for the variational strategy
+            batchsize (int):
+                Size of the minibatches drawn from the full training data within
+                each epoch iteration
+            epochs (int):
+                Number of epochs for which to train the data. Each epoch will
+                train over the full training data, broken into batches
+            learning_rate (float):
+                Learning rate of the Adam optimiser used to learn the LCM
+                parameters.
+            shuffle (bool):
+                Flags reshuffling to training observation prior to batching in
+                each training epoch. If false, each epoch will iterate on the
+                same sequences of training data batches. Default is 'True'
+
+        Returns:
+            None
+        """
         print(u'\u2500' * 75)
         print(' Training gaussian surrogate model')
         self.num_latents = num_latents
@@ -372,7 +660,7 @@ class begrs:
         # CUDA check
         if self.haveGPU:
 
-            print(' CUDA availabe',end="", flush=True)
+            print(' CUDA available',end="", flush=True)
 
             if self.useGPU:
 
@@ -384,7 +672,7 @@ class begrs:
 
         else:
 
-            print(' CUDA not availabe - Using CPU')
+            print(' CUDA not available - Using CPU')
 
 
         # Create data loader from training data
@@ -448,16 +736,45 @@ class begrs:
             self.KLdiv.append(iterKL)
 
 
+    def logP(self, theta_base, batch = False, batch_size = 40):
+        """
+        Evaluate the log-likelihood of the LCM surrogate on the empirical data
 
-    def logP(self, theta_base, batch_size = 40):
+        This method additionally returns the gradient of the log-likelihood with
+        respect to the parameters, calculated using the autograd feature of
+        the torch implementation.
 
-        # paramInds = self.num_vars + self.num_param
+        Two options are available, controlled by the 'batch' argument:
+        - Single: the contribution each empirical observation is evaluated
+          separately (only the main diagonal of the LCM covariance is used).
+          This corresponds to the derivations in the main paper.
+        - Batched: The emprical observations are evaluated in batches. This is
+          less correct (as transitions become correlated) but has the benefit of
+          being faster for average-sized batches (~ 40-50).
 
+        Note: users must have loaded the empirical data using the
+        'setTestingData' method prior to running the 'logP' method. In addition
+        this method assumes that the theta_base parameter vector is already
+        centred.
+
+        Arguments:
+            theta_base (ndarray):
+                1D numpy array containing a centred candidate parameterisation
+            batch (bool):
+                Flags that the log-likelihood should be evaluated over batches
+                of the empirical data. Default is 'False'
+            batch_size (int):
+                Size of the batches for batched mode. Default is 40.
+
+        Returns:
+            returnValue (tuple), containing the following values:
+                logP (numpy float64):
+                    The log-likelihood evaluated at theta_base
+                theta_grad (numpy float64):
+                    The gradient of the log-likelihood evaluated at theta_base
+        """
         theta = torch.from_numpy(theta_base[None,:]).float()
         theta.requires_grad_(True)
-
-        # testX = self.testX.clone()
-        # testX[:,self.num_vars:paramInds] = theta.repeat((self.N,1))
 
         if batch is False:
 
@@ -467,7 +784,6 @@ class begrs:
 
             logP = self.logPBatched(theta,batch_size)
 
-        # logP.backward(retain_graph=True)
         theta_grad = theta.grad
 
         if self.haveGPU is True and self.useGPU is True:
@@ -486,8 +802,56 @@ class begrs:
 
         return returnValue
 
-    def logPSingle(self, theta):
 
+    def softLogPrior(self, theta, k = 20):
+        """
+        Evaluate the logarithm of the soft minimal prior
+        This corresponds to the double logistic minimal prior in the paper.
+
+        Note: this method assumes that the theta parameter vector is already
+        centred.
+
+        Arguments:
+            theta (ndarray):
+                1D numpy array containing a centred candidate parameterisation
+            k (int):
+                Slope parameter of the logistic functions. Higher values lead to
+                sharper boundary transitions. Default is 20.
+
+        Returns:
+            (tuple), containing the following values:
+                (numpy float64):
+                    The log-prior evaluated at theta
+                theta_grad (numpy float64):
+                    The gradient of the log-prior evaluated at theta
+        """
+        sample = np.asarray(theta)
+
+        f_x = np.exp(-k*(sample + 3**0.5))
+        g_x = np.exp( k*(sample - 3**0.5))
+
+        prior = - np.log(1 + f_x) - np.log(1 + g_x)
+        grad = k*(f_x/(1+f_x) - g_x/(1+g_x))
+
+        return (sum(prior),grad)
+
+
+    def logPSingle(self, theta):
+        """
+        (utility) Calculates the log-likelihood based on single transitions
+        (diagonal covariance matrix)
+
+        Note: this method is not meant to be used directly, users should call
+        it through the 'logP' method.
+
+        Arguments:
+            theta (ndarray):
+                1D numpy array containing a centred candidate parameterisation
+
+        Returns:
+            logP (Tensor):
+                The log-likelihood evaluated at theta
+        """
         paramInds = self.num_vars + self.num_param
         testX = self.testX.clone()
         testX[:,self.num_vars:paramInds] = theta.repeat((self.N,1))
@@ -495,7 +859,6 @@ class begrs:
         n = self.testY.shape[0]*self.testY.shape[1]
         batch = torch.cat([testX.unsqueeze(0)]*self.num_latents, dim=0)
         indpts = self.model.variational_strategy.base_variational_strategy.inducing_points
-
 
         preds = self.likelihood(self.model(batch))
         diff = self.testY.reshape([n]) - preds.mean.reshape([n])
@@ -534,7 +897,23 @@ class begrs:
 
 
     def logPBatched(self, theta, batch_size):
+        """
+        (utility) Calculates the log-likelihood based on batches of transitions
 
+        Note: this method is not meant to be used directly, users should call
+        it through the 'logP' method.
+
+        Arguments:
+            theta (ndarray):
+                1D numpy array containing a centred candidate parameterisation
+            batch_size (int):
+                Size of the batches
+
+        Returns:
+            logP (Tensor):
+                The log-likelihood evaluated at theta
+
+        """
         paramInds = self.num_vars + self.num_param
         testX = self.testX.clone()
         testX[:,self.num_vars:paramInds] = theta.repeat((self.N,1))
@@ -557,21 +936,30 @@ class begrs:
         return logP
 
 
-    def softLogPrior(self, theta, k = 20):
-
-        sample = np.asarray(theta)
-
-        f_x = np.exp(-k*(sample + 3**0.5))
-        g_x = np.exp( k*(sample - 3**0.5))
-
-        prior = - np.log(1 + f_x) - np.log(1 + g_x)
-        grad = k*(f_x/(1+f_x) - g_x/(1+g_x))
-
-        return (sum(prior),grad)
-
-
     def dlogP(self, theta, batch_size = 40):
+        """
+        (utility) Calculates the gradient of the batched likelihood using the
+        analytical derivation.
 
+        Note: this method is provided as a validation of the analytical gradient
+        derivations of the paper. Its purpose is to verify that this matches the
+        likelihood gradient obtained via the autograd feature of Torch. It
+        should produce the same gradient as 'logP' in batched mode
+        (batch='True') for a given theta and batch_size, but is significantly
+        slower. As a result, users should not use this method for any other
+        purpose than checking the gradient.
+
+        Arguments:
+            theta (ndarray):
+                1D numpy array containing a centred candidate parameterisation
+            batch_size (int):
+                Size of the batches. Default is 40
+
+        Returns:
+            dL (numpy float64):
+                The gradient of the likelihood evaluated at theta
+
+        """
         # Hard-wired parameters
         latent_dim = 0
         num_dim = 2
