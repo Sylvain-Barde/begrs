@@ -6,7 +6,7 @@ This toolbox implements the Bayesian Estimation with Gaussian process Regression
 
 The toolbox uses [GPytorch](https://gpytorch.ai/), a Gaussian Process toolbox, which itself is uses [PyTorch](https://pytorch.org/). Both packages need to be installed for begrs to work. Additional (standard) packages required are: `os, sys, numpy, tqdm, warnings`.
 
-At the moment the begrs toolbox is still in development, and does not yet have a distributable package (this is on the to-do list!). The functionality is all contained in the `begrs.py` module, and can be obtained simply by placing a copy of the file in the relevant directory.
+At the moment the `begrs` toolbox is still in development, and does not yet have a distributable package (this is on the to-do list!). The functionality is all contained in the `begrs.py` module, and can be obtained simply by placing a copy of the file in the relevant directory.
 
 ## Usage
 
@@ -41,13 +41,12 @@ Given this, training the GP surrogate simply involves providing the training dat
 
 ```python
 # Loading the training data into the estimation object
-begrsEst.setTrainingData(simData, samples, parameter_range)
+# Outliers are winsorized and variables are normalised
+begrsEst.setTrainingData(simData, samples, parameter_range,wins=0.05,normalise=True)
 
-# Training the estimation
+# Training the surrogate model on the simulated data
 begrsEst.train(num_latents, num_inducing_pts, batchSize, numiter, learning_rate)
 ```
-
-
 
 ### Saving and loading surrogate models
 
@@ -55,11 +54,11 @@ Once the training is complete, the state of the BEGRS surrogate can be save for 
 
 ```python
 # Saving to 'savePath/saveDir'
-begrsEst.save(savePath + '/saveDir')
+begrsEst.save('savePath/saveDir')
 ```
 
 **Notes:**
-- The saving directory is created by `begrs`, and should not already exist. This is to explicitly avoid overwriting existing saved states.
+- The saving directory `savePath/saveDir` is created by `begrs`, and should not already exist. Attempting to write to an existing directory will raise an error. This is to explicitly avoid overwriting existing saved states.
 - The save function of `begrsEst` will only save attributes related to training data. See below for more details.
 
 Given a directory containing a saved state, `loadPath`, loading a previously saved trained surrogate is simply a matter of creating an empty estimation object and loading a state into it.
@@ -67,12 +66,12 @@ Given a directory containing a saved state, `loadPath`, loading a previously sav
 ```python
 # Loading a saved state from 'loadPath'
 begrsEst = begrs()
-begrsEst.load(loadPath)
+begrsEst.load('loadPath')
 ```
 
 ### Estimation
 
-Because BEGRS only provides a surrogate likelihood, third part methods are used to actually carry out the estimation. All that `begrs` provides is the (surrogate) log-likelihood function and a basic minimal prior that can be passed to a Bayesian sampling method of choice. Both the likelihood and prior are provided with their gradients, allowing the use of Hamiltonian Monte-Carlo (HMC).
+Because BEGRS only provides a surrogate likelihood, third party methods are used to actually carry out the estimation. All that `begrs` provides is the (surrogate) log-likelihood function and a basic minimal prior that can be passed to a Bayesian sampling method of choice. Both the likelihood and prior are provided with their gradients, allowing the use of Hamiltonian Monte-Carlo (HMC).
 
 #### Loading the empirical data
 
@@ -85,14 +84,14 @@ begrsEst.setTestingData(empData)
 
 **Notes**
 - If the normalisation option was picked when the training data was set, the empirical data will also be normalised in the same way when it is set.
-- Always set the empirical data **after** completing the training or after loading a previosuly trained surrogate model. This is because setting the empirical data switches the surrogate model from training mode into evaluation mode.
+- Always set the empirical data **after** completing the training or after loading a previously trained surrogate model. This is because setting the empirical data switches the surrogate model from training mode into evaluation mode.
 - If a surrogate model is saved after running `setTestingData`, the attributes relating to the empirical data will **not** be saved. This is done because `setTestingData` not only loads empirical data and switches to evaluation model, but also pre-computes fixed likelihood attributes to gain time. Saving only the training attributes ensure that saved surrogate models are always loaded in a 'clean' state and can be re-used on different empirical datasets.
 
 #### Specifying the log posterior.
 
 Before being able to run a Bayesian estimation, the posterior needs to be defined. Furthermore, as explained in the paper, BEGRS necessitates a minimal prior that restricts the posterior to the parameter bounds. It is left up to the user to write a function for the posterior, so that they can integrate a more informative prior if needed.
 
-The most basic case is one where the only the minimal soft prior is required. Given an arbitrary paramete vector `sample`, the log posterior is given by:
+The most basic case is one where the only the minimal soft prior is required. Given an arbitrary parameter vector `sample`, the log posterior is given by:
 
 ```python
 def logPosterior(sample):
@@ -115,7 +114,7 @@ from scipy.optimize import minimize
 # Flip the signs on the posterior
 negLogPosterior = lambda *args: tuple( -i for i in logPosterior(*args))
 
-# Specify bounds and a starting point (Note the paramater vectors are centered)
+# Specify bounds and a starting point (Note the parameter vectors are centred)
 numParams = begrsEst.parameter_range.shape[0]
 bounds = numParams*[(-3**0.5,3**0.5)]
 init = np.zeros(numParams)
