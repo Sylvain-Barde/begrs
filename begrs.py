@@ -32,8 +32,10 @@ from warnings import filterwarnings
 
 from torch.utils.data import TensorDataset, DataLoader
 from gpytorch.utils.cholesky import psd_safe_cholesky
-from gpytorch.lazy import delazify, TriangularLazyTensor, DiagLazyTensor
-from gpytorch.lazy import SumLazyTensor, MatmulLazyTensor, KroneckerProductLazyTensor
+from gpytorch.lazy import (delazify, TriangularLazyTensor, 
+                           ConstantDiagLazyTensor, SumLazyTensor, 
+                           MatmulLazyTensor, DiagLazyTensor, 
+                           BlockDiagLazyTensor, KroneckerProductLazyTensor)
 
 #------------------------------------------------------------------------------
 # Cholesky factorisation utility
@@ -172,6 +174,10 @@ class begrs:
             Evaluation (empirical) inputs
         testY (Tensor):
             Evaluation (empirical) outputs
+        trainMean (ndarray):
+            Mean of training data, used for normalisation
+        trainStd (ndarray):
+            Std.dev. of training data, used for normalisation       
         losses (list):
             list of ELBO values for each training epoch
         KLdiv ():
@@ -240,9 +246,10 @@ class begrs:
         self.trainY = None
         self.testX = None
         self.testY = None
+        self.trainMean = None
+        self.trainStd = None
         self.losses = None
         self.KLdiv = None
-
         self.N = 0
         self.num_vars = 0
         self.num_param = 0
@@ -332,11 +339,10 @@ class begrs:
                 saveDict = {'parameter_range':self.parameter_range,
                             'trainX':self.trainX,
                             'trainY':self.trainY,
-                            # 'testX':self.testX,
-                            # 'testY':self.testY,
+                            'trainMean':self.trainMean,
+                            'trainStd':self.trainStd,
                             'losses':self.losses,
                             'KLdiv':self.KLdiv,
-                            # 'N':self.N,
                             'num_vars':self.num_vars,
                             'num_param':self.num_param,
                             'num_latents':self.num_latents,
@@ -386,9 +392,8 @@ class begrs:
                 self.parameter_range = begrs_dict['parameter_range']
                 self.trainX = begrs_dict['trainX']
                 self.trainY = begrs_dict['trainY']
-                # self.testX = begrs_dict['testX']
-                # self.testY = begrs_dict['testY']
-                # self.N = begrs_dict['N']
+                self.trainMean = begrs_dict['trainMean']
+                self.trainStd = begrs_dict['trainStd']
                 self.losses = begrs_dict['losses']
                 self.KLdiv = begrs_dict['KLdiv']
                 self.num_vars = begrs_dict['num_vars']
@@ -436,7 +441,8 @@ class begrs:
             print('\n Cannot load from {:s}, folder does not exist'.format(path))
 
 
-    def setTrainingData(self, trainingData, doeSamples, parameter_range):
+    def setTrainingData(self, trainingData, doeSamples, parameter_range,
+                        wins = None, normalise = True):
         """
         Build a dataset for LCM training
 
@@ -445,7 +451,7 @@ class begrs:
         particular will contain lags of the observable variables and the
         parameter setttings.
 
-        Note the specific structure that the arguments must take
+        Note the specific structure that the first 3 arguments must take.
 
         Arguments:
             trainingData (ndarray)
@@ -454,8 +460,8 @@ class begrs:
                     T x num_vars x numSamples
 
             doeSamples (ndarray)
-                2D numpy array containing the parameter values corresponding to
-                each simulation run. Structure is:
+                2D numpy array containing the parameter vectors corresponding 
+                to each simulation run. Structure is:
 
                     numSamples x num_param
 
@@ -465,7 +471,18 @@ class begrs:
 
                     num_param x 2
 
-                Lower bound in the first column, uper bound in the second.
+                Lower bound in the first column, upper bound in the second.
+
+            wins (None or float)
+                float in [0,1] interval, sets the tail quantiles to remove by
+                winsorization. 'wins = 0.05' will winsorize the top/bottom 
+                2.5% of the training data for each variable. Set to 'None' by
+                default, omit this parameter if winsorization is not required.
+                
+            normalise (bool)
+                Boolean flag for normalising each variable in the training 
+                data to zero mean and unit standard deviation. Set to 'True'
+                by default.
 
         Returns:
             None
@@ -473,23 +490,55 @@ class begrs:
         print(u'\u2500' * 75)
         print(' Setting training data set', end="", flush = True)
 
-        # Allocate self.num_vars and self.num_param from datasets
+        # Check if dimensions of inuts match
         numSamples = doeSamples.shape[0]
 
-        if numSamples == trainingData.shape[2] and doeSamples.shape[1] == parameter_range.shape[0]:
+        if (numSamples == trainingData.shape[2] and 
+            doeSamples.shape[1] == parameter_range.shape[0]):
 
+            # Allocate class variables from datasets
             self.parameter_range = parameter_range
             self.num_param = doeSamples.shape[1]
-            numObs = trainingData.shape[0]
             self.num_vars = trainingData.shape[1]
+            numObs = trainingData.shape[0]
+
+
+            # Winsorise data if required
+            outStr = ''
+            if wins is not None:
+                outStr += ' - Winsorised top/bottom {:.2f}%\n'.format(100*wins)
+                
+                LB = np.quantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
+                                   wins/2,axis = 0)[None,:,None]
+                UB = np.quantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
+                                   1-wins/2,axis = 0)[None,:,None]
+
+                LBCheck = np.less(trainingData, LB)                
+                UBCheck = np.greater(trainingData, UB)
+                
+                trainingData[LBCheck] = np.tile(LB,
+                                                [numObs,1,numSamples])[LBCheck]
+                trainingData[UBCheck] = np.tile(UB,
+                                                [numObs,1,numSamples])[UBCheck]
+            
+            # Normalise data if required
+            if normalise:
+                outStr += ' - Normalised variables (0 mean, 1 std. dev.)'
+                
+                self.trainMean = np.mean(trainingData,
+                                         axis = (0,2))[None,:,None]
+                self.trainStd = np.std(trainingData,
+                                       axis = (0,2))[None,:,None]
+                
+                trainingData -= self.trainMean
+                trainingData /= self.trainStd
+
+            # Repackage training data and samples
             paramInds = self.num_vars + self.num_param
-
-            samples = self.center(doeSamples)
-
             train_x_array = np.zeros([numSamples*(numObs-1),paramInds])
             train_y_array = np.zeros([numSamples*(numObs-1),self.num_vars])
 
-            # Repackage training data and samples
+            samples = self.center(doeSamples)
             for i in range(numSamples):
 
                 y = trainingData[1:,:,i]
@@ -507,6 +556,7 @@ class begrs:
             self.trainY = torch.from_numpy(train_y_array).float()
 
             print(' - Done', flush = True)
+            print('{:s}\n'.format(outStr))
             print(' N' + u'\u00B0' + ' of parameters: {:>5}'.format(self.num_param))
             print(' N' + u'\u00B0' + ' of variables: {:>5}'.format(self.num_vars))
             print(' N' + u'\u00B0' + ' of parameter samples: {:>5}'.format(numSamples))
@@ -533,11 +583,15 @@ class begrs:
         precomputes some fixed likelihood components (to save time) and sets
         the model to evaluation mode.
 
-        Note: The testing data will need to be explicitly set every time the
-        user wants to load a given begrs surrogate to run an empirical
-        estimation. This is to avoid using the wrong empirical data, and also to
-        ensure that the LCM model is set evaluation mode prior to calculating
-        surrogate likelihoods.
+        Notes: 
+        - If the 'normalise' option was used for the training data (default),
+          the testing data is automatically normalised using the same mean and
+          standard deviation.        
+        - The testing data will need to be explicitly set every time the user
+          wants to load a given begrs surrogate to run an empirical estimation.
+          This is to avoid using the wrong empirical data, and also to ensure
+          that the LCM model is set evaluation mode prior to calculating
+          surrogate likelihoods.
 
         This means that the following attributes of the begrs class are set by
         this method but are not saved by the 'save' method:
@@ -564,8 +618,13 @@ class begrs:
         # Check consistency with number of variables
         if testingData.shape[1] == self.num_vars:
 
-            self.N = testingData.shape[0] - 1
+            # Normalise the testing data if needed.
+            if self.trainMean is not None and self.trainStd is not None:
+                testingData -= self.trainMean.squeeze(-1)
+                testingData /= self.trainStd.squeeze(-1)
 
+            # Save testing data to class attributes
+            self.N = testingData.shape[0] - 1
             self.testY = torch.from_numpy(testingData[1:,:]).float()
 
             test_x_array = np.zeros([self.N, self.num_vars+self.num_param])
@@ -620,7 +679,6 @@ class begrs:
             print(' - in training data: {:>5}'.format(self.num_vars),
                   end="", flush=True)
             print(' - in test data: {:>5}'.format(testingData.shape[1]))
-
 
     def train(self, num_latents, num_inducing_pts, batchsize, epochs,
               learning_rate, shuffle = True):
