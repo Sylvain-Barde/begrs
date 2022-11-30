@@ -42,7 +42,7 @@ Given this, training the GP surrogate simply involves providing the training dat
 ```python
 # Loading the training data into the estimation object
 # Outliers are winsorized and variables are normalised
-begrsEst.setTrainingData(simData, samples, parameter_range,wins=0.05,normalise=True)
+begrsEst.setTrainingData(simData, samples, parameter_range, wins=0.05, normalise=True)
 
 # Training the surrogate model on the simulated data
 begrsEst.train(num_latents, num_inducing_pts, batchSize, numiter, learning_rate)

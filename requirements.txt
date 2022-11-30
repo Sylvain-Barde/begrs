@@ -1,0 +1,6 @@
+scipy
+sampyl-mcmc
+numpy
+torch
+gpytorch==1.2.0
+tqdm
