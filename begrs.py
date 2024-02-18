@@ -24,17 +24,25 @@ Utilities:
 
 import os
 import sys
-import numpy as np
+import pickle
+import zlib
+import time
 import torch
 import gpytorch
+import numpy as np
+import sampyl as smp
+
 from tqdm import tqdm
 from warnings import filterwarnings
+from arviz.stats import ess
+from scipy.optimize import minimize
 
 from torch.utils.data import TensorDataset, DataLoader
 from gpytorch.utils.cholesky import psd_safe_cholesky
-from gpytorch.lazy import (delazify, TriangularLazyTensor, 
-                           ConstantDiagLazyTensor, SumLazyTensor, 
-                           MatmulLazyTensor, DiagLazyTensor, 
+from gpytorch.lazy import MatmulLazyTensor, DiagLazyTensor, BlockDiagLazyTensor
+from gpytorch.lazy import (delazify, TriangularLazyTensor,
+                           ConstantDiagLazyTensor, SumLazyTensor,
+                           MatmulLazyTensor, DiagLazyTensor,
                            BlockDiagLazyTensor, KroneckerProductLazyTensor)
 
 #------------------------------------------------------------------------------
@@ -67,7 +75,7 @@ filterwarnings("ignore", category = UserWarning)
 # Main classes
 class begrsGPModel(gpytorch.models.ApproximateGP):
     """
-    Underlying LCM model used byt the 'begrs' class.
+    Underlying LMC model used byt the 'begrs' class.
     Extension of the 'gpytorch.models.ApproximateGP' class
 
         Attributes:
@@ -98,7 +106,7 @@ class begrsGPModel(gpytorch.models.ApproximateGP):
                 num_param (int):
                     Number of models parameters to estimate
                 num_latents (int):
-                    Number of latent variables for LCM
+                    Number of latent variables for LMC
                 num_inducing_pts (int):
                     Number of inducing points for the variational strategy
         """
@@ -147,7 +155,7 @@ class begrsGPModel(gpytorch.models.ApproximateGP):
 
         Returns:
             (gpytorch.distributions.MultivariateNormal) :
-                The LCM prediction at x
+                The LMC prediction at x
         """
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
@@ -163,7 +171,7 @@ class begrs:
         model (begrsGPModel):
             Instance of the begrsGPModel class
         likelihood (gpytorch.likelihoods.MultitaskGaussianLikelihood):
-            Likelihood for the LCM model
+            Likelihood for the LMC model
         parameter_range (ndarray):
             Bounds for the parameter samples
         trainX (Tensor):
@@ -177,7 +185,7 @@ class begrs:
         trainMean (ndarray):
             Mean of training data, used for normalisation
         trainStd (ndarray):
-            Std.dev. of training data, used for normalisation       
+            Std.dev. of training data, used for normalisation
         losses (list):
             list of ELBO values for each training epoch
         KLdiv ():
@@ -189,7 +197,7 @@ class begrs:
         num_param (int):
             Number of models parameters to estimate
         num_latents (int):
-            Number of latent variables for the LCM
+            Number of latent variables for the LMC
         num_inducing_pts (int):
             Number of inducing points for the variational strategy
         useGPU (bool):
@@ -205,17 +213,17 @@ class begrs:
         uncenter:
             Uncenters a centered parameter vector
         save:
-            Saves the state of the underlying LCM surrogate
+            Saves the state of the underlying LMC surrogate
         load:
-            Load a saved LCM surrogate
+            Load a saved LMC surrogate
         setTrainingData:
-            Build a dataset for LCM training
+            Build a dataset for LMC training
         setTestingData:
-            Set an empirical dataset for estimation (LCM evaluation)
+            Set an empirical dataset for estimation (LMC evaluation)
         train:
-            Train the LCM surrogate on a pre-specified training dataset
+            Train the LMC surrogate on a pre-specified training dataset
         logP:
-            Evaluate the log-likelihood of the LCM surrogate on the empirical
+            Evaluate the log-likelihood of the LMC surrogate on the empirical
             data
         softLogPrior:
             Evaluate the logarithm of the soft minimal prior
@@ -307,12 +315,12 @@ class begrs:
 
     def save(self, path):
         """
-        Saves the state of the underlying LCM surrogate
+        Saves the state of the underlying LMC surrogate
 
-        This is designed to save the state of the LCM surrogate after training,
+        This is designed to save the state of the LMC surrogate after training,
         attributes relating to the testing/evaluation methods are NOT saved.
         This requires setting the testing data explicitly every time an
-        estimation needs to be run, but ensures that saved LCM surrogates can be
+        estimation needs to be run, but ensures that saved LMC surrogates can be
         used on multiple emprirical datasets. See the 'setTestingData' help for
         more details on this aspect.
 
@@ -369,7 +377,7 @@ class begrs:
 
     def load(self, path):
         """
-        Load a saved LCM surrogate
+        Load a saved LMC surrogate
 
         Arguments:
             path (str):
@@ -444,7 +452,7 @@ class begrs:
     def setTrainingData(self, trainingData, doeSamples, parameter_range,
                         wins = None, normalise = True):
         """
-        Build a dataset for LCM training
+        Build a dataset for LMC training
 
         The method builds and saves the training data structure based on the
         simulated data and the simulation samples. The input structure in
@@ -460,7 +468,7 @@ class begrs:
                     T x num_vars x numSamples
 
             doeSamples (ndarray)
-                2D numpy array containing the parameter vectors corresponding 
+                2D numpy array containing the parameter vectors corresponding
                 to each simulation run. Structure is:
 
                     numSamples x num_param
@@ -475,12 +483,12 @@ class begrs:
 
             wins (None or float)
                 float in [0,1] interval, sets the tail quantiles to remove by
-                winsorization. 'wins = 0.05' will winsorize the top/bottom 
+                winsorization. 'wins = 0.05' will winsorize the top/bottom
                 2.5% of the training data for each variable. Set to 'None' by
                 default, omit this parameter if winsorization is not required.
-                
+
             normalise (bool)
-                Boolean flag for normalising each variable in the training 
+                Boolean flag for normalising each variable in the training
                 data to zero mean and unit standard deviation. Set to 'True'
                 by default.
 
@@ -493,7 +501,7 @@ class begrs:
         # Check if dimensions of inuts match
         numSamples = doeSamples.shape[0]
 
-        if (numSamples == trainingData.shape[2] and 
+        if (numSamples == trainingData.shape[2] and
             doeSamples.shape[1] == parameter_range.shape[0]):
 
             # Allocate class variables from datasets
@@ -507,29 +515,29 @@ class begrs:
             outStr = ''
             if wins is not None:
                 outStr += ' - Winsorised top/bottom {:.2f}%\n'.format(100*wins)
-                
+
                 LB = np.quantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
                                    wins/2,axis = 0)[None,:,None]
                 UB = np.quantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
                                    1-wins/2,axis = 0)[None,:,None]
 
-                LBCheck = np.less(trainingData, LB)                
+                LBCheck = np.less(trainingData, LB)
                 UBCheck = np.greater(trainingData, UB)
-                
+
                 trainingData[LBCheck] = np.tile(LB,
                                                 [numObs,1,numSamples])[LBCheck]
                 trainingData[UBCheck] = np.tile(UB,
                                                 [numObs,1,numSamples])[UBCheck]
-            
+
             # Normalise data if required
             if normalise:
                 outStr += ' - Normalised variables (0 mean, 1 std. dev.)'
-                
+
                 self.trainMean = np.mean(trainingData,
                                          axis = (0,2))[None,:,None]
                 self.trainStd = np.std(trainingData,
                                        axis = (0,2))[None,:,None]
-                
+
                 trainingData -= self.trainMean
                 trainingData /= self.trainStd
 
@@ -577,20 +585,20 @@ class begrs:
 
     def setTestingData(self, testingData):
         """
-        Set an empirical dataset for estimation (LCM evaluation)
+        Set an empirical dataset for estimation (LMC evaluation)
 
         The method builds the evaluation structure from the empirical dataset,
         precomputes some fixed likelihood components (to save time) and sets
         the model to evaluation mode.
 
-        Notes: 
+        Notes:
         - If the 'normalise' option was used for the training data (default),
           the testing data is automatically normalised using the same mean and
-          standard deviation.        
+          standard deviation.
         - The testing data will need to be explicitly set every time the user
           wants to load a given begrs surrogate to run an empirical estimation.
           This is to avoid using the wrong empirical data, and also to ensure
-          that the LCM model is set evaluation mode prior to calculating
+          that the LMC model is set evaluation mode prior to calculating
           surrogate likelihoods.
 
         This means that the following attributes of the begrs class are set by
@@ -683,14 +691,14 @@ class begrs:
     def train(self, num_latents, num_inducing_pts, batchsize, epochs,
               learning_rate, shuffle = True):
         """
-        Train the LCM surrogate on a pre-specified training dataset
+        Train the LMC surrogate on a pre-specified training dataset
 
         Note: users must have loaded the training data using the
         'setTrainingData' method prior to running the 'train' method
 
         Arguments:
             num_latents (int):
-                Number of latent variables for the LCM
+                Number of latent variables for the LMC
             num_inducing_pts (int):
                 Number of inducing points for the variational strategy
             batchsize (int):
@@ -700,7 +708,7 @@ class begrs:
                 Number of epochs for which to train the data. Each epoch will
                 train over the full training data, broken into batches
             learning_rate (float):
-                Learning rate of the Adam optimiser used to learn the LCM
+                Learning rate of the Adam optimiser used to learn the LMC
                 parameters.
             shuffle (bool):
                 Flags reshuffling to training observation prior to batching in
@@ -796,7 +804,7 @@ class begrs:
 
     def logP(self, theta_base, batch = False, batch_size = 40):
         """
-        Evaluate the log-likelihood of the LCM surrogate on the empirical data
+        Evaluate the log-likelihood of the LMC surrogate on the empirical data
 
         This method additionally returns the gradient of the log-likelihood with
         respect to the parameters, calculated using the autograd feature of
@@ -804,7 +812,7 @@ class begrs:
 
         Two options are available, controlled by the 'batch' argument:
         - Single: the contribution each empirical observation is evaluated
-          separately (only the main diagonal of the LCM covariance is used).
+          separately (only the main diagonal of the LMC covariance is used).
           This corresponds to the derivations in the main paper.
         - Batched: The emprical observations are evaluated in batches. This is
           less correct (as transitions become correlated) but has the benefit of
@@ -883,7 +891,10 @@ class begrs:
                 theta_grad (numpy float64):
                     The gradient of the log-prior evaluated at theta
         """
-        sample = np.asarray(theta)
+        # convert to array, protect against overflows
+        sample = np.clip(np.asarray(theta),
+                         -20,
+                         20)
 
         f_x = np.exp(-k*(sample + 3**0.5))
         g_x = np.exp( k*(sample - 3**0.5))
@@ -1153,3 +1164,412 @@ class begrs:
             dL += returnValue
 
         return dL
+
+class begrsNutsSampler:
+    """
+    NUTS Sampler class for the package. See function-level help for more
+    details.
+
+    Attributes:
+
+        begrsModel (begrs object)
+            Instance of the begrs class
+        logP (function)
+            Function providing the log posterior
+        mode (ndarray)
+            vector of parameter values at the posterior mode
+        nuts (sampyl.NUTS object)
+            Instance of the sampyl NUTS sampler class
+
+    Methods:
+        __init__ :
+            Initialises an empty instance of the class
+        minESS:
+            Calculates the effecgive sample size of a sample
+        setup:
+            Configure the NUTS smppler
+        run:
+            Run the NUTS sampler
+    """
+
+    def __init__(self,begrsModel,logP):
+        """
+        Initialises an empty instance of the class
+
+
+        Arguments:
+            begrsModel (begrs):
+                An instange of a begrs surrogate model
+            logP (function):
+                A user-defined function providing the log posterior.
+
+        """
+        # Initialise empty fields
+        self.begrsModel = begrsModel
+        self.logP = logP
+        self.mode = None
+        self.nuts = None
+
+    def minESS(self,array):
+        """
+        Calculates the effecgive sample size of a sample
+
+
+        Arguments:
+            array (ndarray):
+                A posterior sample produced by the NUTS sampler
+
+        Returns:
+            float
+                The effective sample size of the posterior sample.
+        """
+
+        essVec = np.zeros(array.shape[1])
+        for i in range(array.shape[1]):
+            essVec[i] = ess(array[:,i])
+
+        return min(essVec)
+
+    def setup(self, data, init):
+        """
+        Configure the NUTS sampler
+
+
+        Arguments:
+            data (ndarray):
+                The empirical dataset required to calculate the likelihood.
+            init (ndarray):
+                A centered vector of initial values for the parameter vector.
+        """
+
+        print('NUTS sampler initialisation')
+
+        # Set data as the BEGRS testing set
+        self.begrsModel.setTestingData(data)
+
+        # Find posterior mode
+        print('Finding MAP vector')
+        t_start = time.time()
+        nll = lambda *args: tuple( -i for i in self.logP(*args))
+        sampleMAP = minimize(nll, init,
+                             method='L-BFGS-B',
+                             bounds = self.begrsModel.num_param*[(-3**0.5,3**0.5)],
+                             jac = True)
+        self.mode = sampleMAP.x
+        print(' {:10.4f} secs.'.format(time.time() - t_start))
+
+        # Setup NUTS
+        t_start = time.time()
+        start = smp.state.State.fromfunc(self.logP)
+        start.update({'sample': self.mode})
+        E_cutoff = -2*self.logP(self.mode)[0]
+        scale = np.ones_like(init)
+        self.nuts = smp.NUTS(self.logP,
+                        start,
+                        scale = {'sample': scale},
+                        grad_logp = True,
+                        step_size = 0.01,
+                        Emax = E_cutoff)
+
+    def run(self, N, burn = 0):
+        """
+        Run the NUTS sampler
+
+        Arguments:
+            N (int):
+                Number of NUTS samples to draw from the posterior
+            burn (int)
+                Numberr of burn-in samples to discard. The default is 0.
+
+        Returns:
+        -------
+            posteriorSample (ndarray):
+                (N - burn) posterior NUTS samples
+        """
+
+        print('NUTS sampling')
+
+        # Draw samples from posterior
+        t_start = time.time()
+        chain = self.nuts.sample(N, burn=burn)
+
+        # Process chain to uncenter samples
+        posteriorSample = np.zeros([N-burn,self.begrsModel.num_param])
+        for i, sampleCntrd in enumerate(chain.tolist()):
+            posteriorSample[i,:] = self.begrsModel.uncenter(sampleCntrd)
+
+        print(' {:10.4f} secs.'.format(time.time() - t_start))
+
+        return posteriorSample
+
+class begrsSbc:
+    """
+    Simulated Bayesian Comouting class for the package. See function-level
+    help for more details.
+
+    Based on:
+
+        Talts, Sean, Michael Betancourt, Daniel Simpson, Aki Vehtari, and
+        Andrew Gelman (2018) “Validating Bayesian inference algorithms with
+        simulation-based calibration,” arXiv preprint arXiv:1804.06788.
+
+    Attributes:
+
+        testSamples (ndarray)
+            2-dimensional array of testing parameterizations
+        testSamples (ndarray)
+            3-dimensional array of simulated data
+        hist (ndarray)
+            Rank histogram
+        histBins (ndarray)
+            Bins for the rank histogram
+        numParam (int)
+            Number of parameters in a posterior sample
+        numSamples (int)
+            Number of samples in SBC analysis
+        posteriorSampler (begrsNutsSampler)
+            Instance of the begrsNutsSampler class used as the sampler
+        posteriorSamplesMC (list of ndarrays)
+            list of posterior samples for each testing parametrization
+        posteriorSamplesESS (list of floats)
+            list of effecive sample sizes for the posterior samples
+
+    Methods:
+        __init__ :
+            Initialises an empty instance of the class
+        saveData:
+            Save the result of the SBC analysis
+        setTestData:
+            Set the testing samples and data for the SBC analysis
+        setPosteriorSampler:
+            Set the posterior samplet for the SBC analysis
+        run:
+            Run the SBC analysis
+    """
+
+    def __init__(self):
+        """
+        Initialises an empty instance of the class
+
+        No input arguments
+
+        """
+
+        self.testSamples = None
+        self.testData = None
+        self.hist = None
+        self.histBins = None
+        self.numParam = None
+        self.numSamples = None
+        self.posteriorSampler = None
+        self.posteriorSamplesMC = []
+        self.posteriorSamplesESS = []
+
+    def saveData(self, path):
+        """
+        Save the result of the SBC analysis
+
+        Notes:
+        - Data is saved as a pickled Dict,
+        - Existing files will be overwritten
+
+        Arguments:
+            path (str):
+                A path to a file
+        """
+
+        print(u'\u2500' * 75)
+        print(' Saving SBC run data to: {:s} '.format(path), end="", flush=True)
+
+        # Check saving already exists
+        if not os.path.exists(path):
+
+            dirName,fileName = os.path.split(path)
+
+            if not os.path.exists(dirName):
+                os.makedirs(dirName,mode=0o777)
+
+            saveDict = {'testSamples':self.testSamples,
+                        'testData':self.testData,
+                        'hist':self.hist,
+                        'posteriorSamples':self.posteriorSamplesMC}
+
+            fil = open(path,'wb')
+            fil.write(zlib.compress(pickle.dumps(saveDict, protocol=2)))
+            fil.close()
+
+            print(' - Done')
+
+        else:
+
+            print('\n Cannot write to {:s}, file already exists'.format(path))
+
+    def setTestData(self, testSamples, testData):
+        """
+        Set the testing samples and data for the SBC analysis
+
+        Note the specific structure that the 2 arguments must take.
+
+        Arguments:
+            testSamples (ndarray)
+                2D numpy array containing the parameter vectors drawn from the
+                prior. Structure is:
+
+                    numSamples x numParams
+
+            testData (ndarray)
+                3D numpy array containing the simulated data corresponding to
+                each parameter sample. Structure is:
+
+                    T x num_vars x numSamples
+        """
+
+        print(u'\u2500' * 75)
+        print(' Setting test samples & data', end="", flush=True)
+
+        if testSamples.shape[0] == testData.shape[-1]:
+
+            self.testData = testData
+            self.numSamples = testData.shape[-1]
+            self.testSamples = testSamples
+            self.numParam = testSamples.shape[-1]
+            print(' - Done')
+
+        else:
+            print(' - Error, inconsistent number of samples')
+            print(' N' + u'\u00B0' +' of samples:')
+            print(' - in test samples: {:>5}'.format(testSamples.shape[0]))
+            print(' - in test data: {:>5}'.format(testData.shape[-1]))
+
+    def setPosteriorSampler(self, posteriorSampler):
+        """
+        Set the posterior samplet for the SBC analysis
+
+        Arguments:
+            posteriorSampler (list of ndarrays)
+                Instance of the begrsNutsSampler class
+        """
+
+        self.posteriorSampler = posteriorSampler
+
+    def run(self, N, burn, init, autoThin = True, essCutoff = 0):
+        """
+        Run the SBC analysis
+
+        Produce a rank histogram with (N - burn + 1) bins by drawing (N-burn)
+        samples for each parameter sample in the testing samples.
+
+        Notes:
+        - If auto=thin is active (true by default), the algoroithm will
+          draw posterior samples until the effective sample size of the draws
+          is (N-burn). This setting allows to control for autocorrelation in
+          the posterior samples The histogram is then calculated from
+          normalised counts of the entire set of posterior samples.
+        - When autothis is active, the algorithm first draws (N - burn)
+          posterior samples, then calculates the ESS. If the ESS is less than
+          95% of the required length, the number of extra samples to draw is:
+
+              (N - burn)/ESS - 1
+
+          This continues iteratively until the ESS > 0.95 (N-burn) condition is
+          met.
+
+          If the ESS is very low (<5), then the size of the extra run will
+          dramatically increase. This can happen for example if the burn-in
+          period is too short. The essCutoff parameter protects against this by
+          specifying a minimal size to the ESS used in the sample size
+          calculation. This becomes:
+
+              (N - burn)/max(ESS, essCutoff) - 1
+
+          By default this is zet to 0, which is the same as specifying no
+          cutoff.
+
+        Arguments
+        ----------
+            N (int):
+                Number of NUTS samples to draw from the posterior
+            burn (int)
+                Numberr of burn-in samples to discard.
+            init (ndarray):
+                A centered vector of initial values for the parameter vector.
+            autoThin (boolean):
+                Flag for using auto-thinning. The default is True.
+            essCutoff (float)
+                Minimal ESS cutoff used for autothin sample calculation. The
+                default is 0.
+        """
+
+        print(u'\u2500' * 75)
+        print(' Running SBC analysis', end="", flush=True)
+
+        # Consistency checks here - make sure we have everything
+        if self.testSamples is None:
+            print(' - Error, no parameter samples provided')
+            print(u'\u2500' * 75)
+            return
+
+        if self.testData is None:
+            print(' - Error, no test data provided for samples')
+            print(u'\u2500' * 75)
+            return
+
+        if self.posteriorSampler is None:
+            print(' - Error, no posterior sampler provided')
+            print(u'\u2500' * 75)
+            return
+
+        if self.hist is not None:
+            print(' - Error, already run & histogram exists')
+            print(u'\u2500' * 75)
+            return
+
+        # Run analysis if all checks passed
+        L = N-burn
+        for ind in range(self.testData.shape[-1]):
+
+            print('Sample: {:d} of {:d}'.format(ind+1,
+                                                self.numSamples))
+            # Setup sampler
+            data = self.testData[:,:,ind]
+            testSample = self.testSamples[ind]
+
+            self.posteriorSampler.setup(data, init)
+
+            # Get a first sample and determine ESS
+            posteriorSamples = self.posteriorSampler.run(N, burn)
+            sampleESS = self.posteriorSampler.minESS(posteriorSamples)
+            print('Minimal sample ESS: {:.2f}'.format(sampleESS))
+            L_2 = posteriorSamples.shape[0]
+
+            # If auto thin active and ESS inssufficient, retake samples
+            if autoThin:
+                while sampleESS < 0.95*L:
+
+                    # Adjust sample ESS if below specified cutoff
+                    adjustedSampleESS = max(sampleESS,essCutoff)
+                    thinRatio = L/adjustedSampleESS - 1
+
+                    addSamples = self.posteriorSampler.run(
+                                        np.ceil(L_2*thinRatio).astype(int))
+                    posteriorSamples = np.concatenate((posteriorSamples,
+                                                      addSamples),
+                                                      axis = 0)
+                    sampleESS = self.posteriorSampler.minESS(posteriorSamples)
+                    print('Minimal sample ESS: {:.2f}'.format(sampleESS))
+                    L_2 = posteriorSamples.shape[0]
+
+            # Initialise histogram on first run
+            if self.hist is None:
+                self.histBins = np.arange(self.numParam)
+                self.hist = np.zeros([L + 1, self.numParam])
+
+            # Augment histogram and MC collection of posterior samples
+            rankStatsRaw = sum(posteriorSamples < testSample)
+            rankStats = np.floor(rankStatsRaw * L/L_2).astype(int)
+            self.hist[rankStats,self.histBins]+=1
+            self.posteriorSamplesMC.append(posteriorSamples)
+            self.posteriorSamplesESS.append(sampleESS)
+
+        print(' SBC analysis complete')
+        print(u'\u2500' * 75)

@@ -4,7 +4,7 @@ This toolbox implements the Bayesian Estimation with Gaussian process Regression
 
 ## Requirements and Installation
 
-A `requirements.txt` file is provided. The toolbox is built using [GPytorch](https://gpytorch.ai/), a Gaussian Process toolbox, which itself is uses [PyTorch](https://pytorch.org/). Both packages need to be installed for `begrs` to work. Note that there is a specific version requirement (1.2.0), as later versions are not (yet) compatible, this is on the to-do list. Additional (standard) packages required are: `os, sys, numpy, tqdm, warnings`.
+A `requirements.txt` file is provided. The toolbox is built using [GPytorch](https://gpytorch.ai/), a Gaussian Process toolbox, which itself uses [PyTorch](https://pytorch.org/). Both packages need to be installed for `begrs` to work. Note that there is a specific version requirement (1.2.0), as later versions are not (yet) compatible, this is on the to-do list. Additional (standard) packages required are: `os, sys, numpy, tqdm, warnings`.
 
 At the moment the `begrs` toolbox is still in development, and does not yet have a distributable package (this is on the to-do list!). The functionality is all contained in the `begrs.py` module, and can be obtained simply by placing a copy of the file in the relevant directory.
 
@@ -139,8 +139,8 @@ import numpy as np
 start = smp.state.State.fromfunc(logPosterior)
 start.update({'sample': sampleMode})
 
-# Specify a cutoff (saves time)
-E_cutoff = -2*logP(vec)[0]
+# Specify a cutoff as a multiple of the mode likelihood (saves time)
+E_cutoff = -2*logP(sampleMAP.x)[0]
 
 # Run NUTS
 nuts = smp.NUTS(logPosterior, start,
