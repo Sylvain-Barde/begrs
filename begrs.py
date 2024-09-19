@@ -10,11 +10,17 @@ Requires the following packages:
 
     torch
     gpytorch
+    scipy
+    sampyl-mcmc
+    numpy
+    arviz
 
 Classes:
 
     begrsGPModel
     begrs
+    begrsNutsSampler
+    begrsSbc
 
 Utilities:
 
@@ -39,7 +45,6 @@ from scipy.optimize import minimize
 
 from torch.utils.data import TensorDataset, DataLoader
 from gpytorch.utils.cholesky import psd_safe_cholesky
-from gpytorch.lazy import MatmulLazyTensor, DiagLazyTensor, BlockDiagLazyTensor
 from gpytorch.lazy import (delazify, TriangularLazyTensor,
                            ConstantDiagLazyTensor, SumLazyTensor,
                            MatmulLazyTensor, DiagLazyTensor,
@@ -449,7 +454,7 @@ class begrs:
             print('\n Cannot load from {:s}, folder does not exist'.format(path))
 
 
-    def setTrainingData(self, trainingData, doeSamples, parameter_range,
+    def setTrainingData(self, trainingData, trainingSamples, parameter_range,
                         wins = None, normalise = True):
         """
         Build a dataset for LMC training
@@ -467,7 +472,7 @@ class begrs:
 
                     T x num_vars x numSamples
 
-            doeSamples (ndarray)
+            trainingSamples (ndarray)
                 2D numpy array containing the parameter vectors corresponding
                 to each simulation run. Structure is:
 
@@ -499,14 +504,14 @@ class begrs:
         print(' Setting training data set', end="", flush = True)
 
         # Check if dimensions of inuts match
-        numSamples = doeSamples.shape[0]
+        numSamples = trainingSamples.shape[0]
 
         if (numSamples == trainingData.shape[2] and
-            doeSamples.shape[1] == parameter_range.shape[0]):
+            trainingSamples.shape[1] == parameter_range.shape[0]):
 
             # Allocate class variables from datasets
             self.parameter_range = parameter_range
-            self.num_param = doeSamples.shape[1]
+            self.num_param = trainingSamples.shape[1]
             self.num_vars = trainingData.shape[1]
             numObs = trainingData.shape[0]
 
@@ -546,7 +551,7 @@ class begrs:
             train_x_array = np.zeros([numSamples*(numObs-1),paramInds])
             train_y_array = np.zeros([numSamples*(numObs-1),self.num_vars])
 
-            samples = self.center(doeSamples)
+            samples = self.center(trainingSamples)
             for i in range(numSamples):
 
                 y = trainingData[1:,:,i]
@@ -576,10 +581,10 @@ class begrs:
                   ' of parameter samples: ')
             print(' - in range matrix: {:>5}'.format(parameter_range.shape[0]),
                   end="", flush=True)
-            print(' - in DOE matrix: {:>5}'.format(doeSamples.shape[1]))
+            print(' - in DOE matrix: {:>5}'.format(trainingSamples.shape[1]))
             print(' - in training data: {:>5}'.format(trainingData.shape[2]),
                   end="", flush=True)
-            print(' - in DOE matrix: {:>5}'.format(doeSamples.shape[0]),
+            print(' - in DOE matrix: {:>5}'.format(trainingSamples.shape[0]),
                   end="", flush=True)
 
 
@@ -1370,8 +1375,13 @@ class begrsSbc:
         Save the result of the SBC analysis
 
         Notes:
-        - Data is saved as a pickled Dict,
+        - Data is saved as a pickled and zipped Dict
         - Existing files will be overwritten
+        - Variables saved are:
+            testSamples
+            testData
+            hist
+            posteriorSamplesMC
 
         Arguments:
             path (str):
@@ -1542,7 +1552,7 @@ class begrsSbc:
             print('Minimal sample ESS: {:.2f}'.format(sampleESS))
             L_2 = posteriorSamples.shape[0]
 
-            # If auto thin active and ESS inssufficient, retake samples
+            # If auto thin active and ESS insufficient, retake samples
             if autoThin:
                 while sampleESS < 0.95*L:
 
