@@ -516,31 +516,33 @@ class begrs:
             numObs = trainingData.shape[0]
 
 
-            # Winsorise data if required
+            # Winsorise data if required (NaN - robust)
             outStr = ''
             if wins is not None:
                 outStr += ' - Winsorised top/bottom {:.2f}%\n'.format(100*wins)
 
-                LB = np.quantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
+                LB = np.nanquantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
                                    wins/2,axis = 0)[None,:,None]
-                UB = np.quantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
+                UB = np.nanquantile(np.vstack(np.moveaxis(trainingData,-1,-2)),
                                    1-wins/2,axis = 0)[None,:,None]
 
-                LBCheck = np.less(trainingData, LB)
-                UBCheck = np.greater(trainingData, UB)
+                LBCheck = np.less(trainingData, LB,
+                                  where =~ np.isnan(trainingData))
+                UBCheck = np.greater(trainingData, UB,
+                                  where =~ np.isnan(trainingData))
 
                 trainingData[LBCheck] = np.tile(LB,
                                                 [numObs,1,numSamples])[LBCheck]
                 trainingData[UBCheck] = np.tile(UB,
                                                 [numObs,1,numSamples])[UBCheck]
 
-            # Normalise data if required
+            # Normalise data if required  (NaN - robust)
             if normalise:
-                outStr += ' - Normalised variables (0 mean, 1 std. dev.)'
+                outStr += ' - Normalised variables (0 mean, 1 std. dev.)\n'
 
-                self.trainMean = np.mean(trainingData,
+                self.trainMean = np.nanmean(trainingData,
                                          axis = (0,2))[None,:,None]
-                self.trainStd = np.std(trainingData,
+                self.trainStd = np.nanstd(trainingData,
                                        axis = (0,2))[None,:,None]
 
                 trainingData -= self.trainMean
@@ -564,6 +566,17 @@ class begrs:
                 train_x_array[i*(numObs-1):(i+1)*(numObs-1),
                               self.num_vars:paramInds] = np.tile(sample,
                                                                   (numObs-1,1))
+
+            # Remove rows that contain NaN values
+            yNaNs = np.any(np.isnan(train_y_array), axis=1)
+            xNaNs = np.any(np.isnan(train_x_array), axis=1)
+            dropNans = np.where(np.logical_or(xNaNs,yNaNs))[0]
+            if not dropNans.size == 0:
+                outStr += ' - Dropping {:d} NaN observations\n'.format(len(dropNans))
+
+            train_x_array = np.delete(train_x_array, dropNans, axis=0)
+            train_y_array = np.delete(train_y_array, dropNans, axis=0)
+
             # Convert to tensors and store
             self.trainX = torch.from_numpy(train_x_array).float()
             self.trainY = torch.from_numpy(train_y_array).float()
