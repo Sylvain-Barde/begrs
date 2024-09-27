@@ -462,7 +462,7 @@ class begrs:
         The method builds and saves the training data structure based on the
         simulated data and the simulation samples. The input structure in
         particular will contain lags of the observable variables and the
-        parameter setttings.
+        parameter setttings. NaN values are dropped from the dataset.
 
         Note the specific structure that the first 3 arguments must take.
 
@@ -613,6 +613,7 @@ class begrs:
         - If the 'normalise' option was used for the training data (default),
           the testing data is automatically normalised using the same mean and
           standard deviation.
+        - NaN values are dropped from the dataset.
         - The testing data will need to be explicitly set every time the user
           wants to load a given begrs surrogate to run an empirical estimation.
           This is to avoid using the wrong empirical data, and also to ensure
@@ -643,11 +644,22 @@ class begrs:
 
         # Check consistency with number of variables
         if testingData.shape[1] == self.num_vars:
+            outStr = ''
 
             # Normalise the testing data if needed.
             if self.trainMean is not None and self.trainStd is not None:
                 testingData -= self.trainMean.squeeze(-1)
                 testingData /= self.trainStd.squeeze(-1)
+                outStr += ' - Normalised variables (0 mean, 1 std. dev.)\n'
+                
+            # Remove rows that contain NaN values
+            testNaNs = np.any(np.isnan(testingData), axis=1)
+            dropNans = np.where(testNaNs)[0]
+            testingData = np.delete(testingData, dropNans, axis=0)
+
+            if not dropNans.size == 0:
+                outStr += ' - Dropping {:d} NaN observations\n'.format(
+                            len(dropNans))
 
             # Save testing data to class attributes
             self.N = testingData.shape[0] - 1
@@ -665,7 +677,9 @@ class begrs:
             self.model.eval()
             self.likelihood.eval()
 
-            print(' - Done')
+            print(' - Done', flush = True)
+            print('{:s}'.format(outStr))
+
             print(' Precomputing Likelihood components', end="", flush=True)
 
             # Whitening (Cholesky) on the inducing points kernel covariance
@@ -1322,7 +1336,7 @@ class begrsNutsSampler:
 
 class begrsSbc:
     """
-    Simulated Bayesian Comouting class for the package. See function-level
+    Simulated Bayesian Computing class for the package. See function-level
     help for more details.
 
     Based on:
@@ -1483,12 +1497,12 @@ class begrsSbc:
         samples for each parameter sample in the testing samples.
 
         Notes:
-        - If auto=thin is active (true by default), the algoroithm will
+        - If auto-thin is active (true by default), the algoroithm will
           draw posterior samples until the effective sample size of the draws
           is (N-burn). This setting allows to control for autocorrelation in
           the posterior samples The histogram is then calculated from
           normalised counts of the entire set of posterior samples.
-        - When autothis is active, the algorithm first draws (N - burn)
+        - When auto-thin is active, the algorithm first draws (N - burn)
           posterior samples, then calculates the ESS. If the ESS is less than
           95% of the required length, the number of extra samples to draw is:
 
